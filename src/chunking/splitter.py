@@ -38,7 +38,10 @@ def get_splitter_for_extension(ext: str) -> Any:
             chunk_overlap=CHUNK_OVERLAP
         )
     elif ext_lower in CONFIG_EXTENSIONS:
-        return None
+        return RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP
+        )
     else:
         # Any other extension, including empty string "" (dotfiles like .gitignore, .coveragerc)
         return RecursiveCharacterTextSplitter(
@@ -62,27 +65,19 @@ def chunk_file(file_obj: dict[str, str]) -> list[dict[str, Any]]:
     ext = file_obj.get("extension", "")
     ext_lower = ext.lower() if ext else ""
 
-    if ext_lower in CONFIG_EXTENSIONS:
-        lines = content.splitlines()
-        total_lines = len(lines) if lines else 1
-        return [{
-            "text": content,
-            "file_path": path,
-            "start_line": 1,
-            "end_line": total_lines,
-            "language": "config",
-            "file_type": "config"
-        }]
-
-    splitter = get_splitter_for_extension(ext_lower)
     if not content or not content.strip():
         return []
 
+    splitter = get_splitter_for_extension(ext_lower)
     raw_chunks = splitter.split_text(content)
     chunks = []
 
-    lang = ext_lower.lstrip(".") if ext_lower else "plaintext"
-    file_type = "code" if ext_lower in CODE_EXTENSIONS else "doc"
+    if ext_lower in CONFIG_EXTENSIONS:
+        lang = "config"
+        file_type = "config"
+    else:
+        lang = ext_lower.lstrip(".") if ext_lower else "plaintext"
+        file_type = "code" if ext_lower in CODE_EXTENSIONS else "doc"
 
     for c in raw_chunks:
         start_line, end_line = map_chunk_to_lines(c, content)
