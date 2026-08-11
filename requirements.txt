@@ -1,0 +1,11 @@
+mcp
+groq
+langchain
+langgraph
+langchain-text-splitters
+fastembed
+faiss-cpu
+pydantic
+python-dotenv
+streamlit
+numpy
