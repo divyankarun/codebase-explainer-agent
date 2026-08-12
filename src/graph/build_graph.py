@@ -28,8 +28,9 @@ def build_graph(index: Any, chunk_metadata: list[dict], summary: Any):
         if not messages:
             return {"route": "specific"}
         latest_question = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
-        classification = classify_question(latest_question)
+        classification = classify_question(latest_question, conversation_history=messages)
         return {"route": classification}
+
 
     def architecture_node(state: GraphState) -> dict:
         messages = state.get("messages", [])

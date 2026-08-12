@@ -117,8 +117,52 @@ async def _fetch_file_content(session: ClientSession, owner: str, repo: str, pat
 
 
 
+def _fetch_via_github_api(owner: str, repo: str) -> tuple[list[dict[str, str]], int, int]:
+    """Fallback fetcher using GitHub REST API when Docker MCP is unavailable."""
+    import urllib.request
+    print(f"Using GitHub REST API fallback for {owner}/{repo}...")
+    headers = {"User-Agent": "CodebaseExplainerAgent"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+    
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        tree_data = json.loads(resp.read().decode("utf-8"))
+    
+    tree = tree_data.get("tree", [])
+    raw_paths = [item["path"] for item in tree if item.get("type") == "blob"]
+    raw_count = len(raw_paths)
+    
+    filtered_paths = filter_files(raw_paths)
+    filtered_count = len(filtered_paths)
+    
+    file_dicts = []
+    for path in filtered_paths:
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
+        try:
+            r = urllib.request.Request(raw_url, headers=headers)
+            with urllib.request.urlopen(r) as resp:
+                content = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            content = ""
+        _, ext = os.path.splitext(path)
+        file_dicts.append({
+            "path": path,
+            "content": content,
+            "extension": ext
+        })
+    
+    cache_path = get_cache_path(owner, repo)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(file_dicts, f, indent=2)
+        
+    return file_dicts, raw_count, filtered_count
+
+
 async def fetch_repository_files_async(repo_url: str) -> tuple[list[dict[str, str]], int, int]:
-    """Fetch and filter repository files using GitHub MCP Server via stdio Docker transport.
+    """Fetch and filter repository files using GitHub MCP Server via stdio Docker transport,
+    falling back to GitHub REST API if Docker MCP is unavailable.
     
     Returns:
         tuple of (file_dicts, raw_file_count, filtered_file_count)
@@ -134,6 +178,20 @@ async def fetch_repository_files_async(repo_url: str) -> tuple[list[dict[str, st
             cached_files = json.load(f)
         return cached_files, len(cached_files), len(cached_files)
 
+    # Check if Docker is available and daemon is responsive
+    docker_available = False
+    try:
+        import subprocess
+        res = subprocess.run(["docker", "info"], capture_output=True, timeout=3)
+        if res.returncode == 0:
+            docker_available = True
+    except Exception:
+        docker_available = False
+
+    if not docker_available:
+        print(f"[INFO] Docker daemon is not running/available. Using GitHub REST API fallback for {owner}/{repo}...")
+        return _fetch_via_github_api(owner, repo)
+
     server_params = StdioServerParameters(
         command="docker",
         args=[
@@ -148,37 +206,43 @@ async def fetch_repository_files_async(repo_url: str) -> tuple[list[dict[str, st
     )
     
     print(f"Connecting to GitHub MCP server for {owner}/{repo}...")
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            
-            # 1. Fetch full file tree
-            raw_paths = await _fetch_tree_recursive(session, owner, repo, path="")
-            raw_count = len(raw_paths)
-            
-            # 2. Filter paths
-            filtered_paths = filter_files(raw_paths)
-            filtered_count = len(filtered_paths)
-            
-            # 3. Fetch contents for filtered files
-            file_dicts = []
-            for path in filtered_paths:
-                content = await _fetch_file_content(session, owner, repo, path)
-                _, ext = os.path.splitext(path)
-                file_dicts.append({
-                    "path": path,
-                    "content": content,
-                    "extension": ext
-                })
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
                 
-            # 4. Cache results
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(file_dicts, f, indent=2)
+                # 1. Fetch full file tree
+                raw_paths = await _fetch_tree_recursive(session, owner, repo, path="")
+                raw_count = len(raw_paths)
                 
-            return file_dicts, raw_count, filtered_count
+                # 2. Filter paths
+                filtered_paths = filter_files(raw_paths)
+                filtered_count = len(filtered_paths)
+                
+                # 3. Fetch contents for filtered files
+                file_dicts = []
+                for path in filtered_paths:
+                    content = await _fetch_file_content(session, owner, repo, path)
+                    _, ext = os.path.splitext(path)
+                    file_dicts.append({
+                        "path": path,
+                        "content": content,
+                        "extension": ext
+                    })
+                    
+                # 4. Cache results
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(file_dicts, f, indent=2)
+                    
+                return file_dicts, raw_count, filtered_count
+    except Exception as e:
+        print(f"[WARNING] GitHub MCP Docker connection failed: {e}. Falling back to GitHub REST API...")
+        return _fetch_via_github_api(owner, repo)
+
 
 
 def fetch_repository_files(repo_url: str) -> tuple[list[dict[str, str]], int, int]:
     """Synchronous wrapper for fetch_repository_files_async."""
     return asyncio.run(fetch_repository_files_async(repo_url))
+
 

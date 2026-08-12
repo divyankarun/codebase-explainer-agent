@@ -40,7 +40,7 @@ def _format_summary_text(summary: Any) -> str:
 {notable_patterns}"""
 
 
-def _build_groq_messages(system_prompt: str, question: str, messages: list = None) -> list[dict]:
+def _build_groq_messages(system_prompt: str, question: str, messages: list = None, citation_reminder: str = None) -> list[dict]:
     """Construct Groq messages payload including system context, conversation history, and latest query."""
     groq_msgs = [{"role": "system", "content": system_prompt}]
 
@@ -62,7 +62,11 @@ def _build_groq_messages(system_prompt: str, question: str, messages: list = Non
             if content:
                 groq_msgs.append({"role": role, "content": content})
 
-    groq_msgs.append({"role": "user", "content": question})
+    user_content = question
+    if citation_reminder:
+        user_content = f"{question}\n\n{citation_reminder}"
+
+    groq_msgs.append({"role": "user", "content": user_content})
     return groq_msgs
 
 
@@ -91,13 +95,27 @@ Use the following high-level Architecture Summary of the codebase to answer the 
     groq_msgs = _build_groq_messages(system_prompt, question, messages)
 
     client = Groq(api_key=GROQ_API_KEY)
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=groq_msgs,
-        temperature=0.2,
-    )
+    response = None
+    for m in [GROQ_MODEL, "llama-3.1-8b-instant"]:
+        for attempt in range(3):
+            try:
+                response = client.chat.completions.create(
+                    model=m,
+                    messages=groq_msgs,
+                    temperature=0.2,
+                )
+                break
+            except Exception as e:
+                if "rate_limit" in str(e).lower() or "429" in str(e):
+                    import time
+                    print(f"[SUMMARY RATE LIMIT] Hit 429 on model '{m}' (attempt {attempt+1}/3). Waiting 4s...")
+                    time.sleep(4)
+                else:
+                    raise e
+        if response:
+            break
 
-    return response.choices[0].message.content or ""
+    return response.choices[0].message.content or "" if response else ""
 
 
 def answer_from_retrieval(
@@ -182,6 +200,11 @@ def answer_from_retrieval(
     retrieved_code_ctx = "\n\n---\n\n".join(formatted_chunks) if formatted_chunks else "No relevant code chunks found."
     summary_ctx = _format_summary_text(summary)
 
+    citation_instruction = """CRITICAL CITATION REQUIREMENT:
+Every factual claim about the code, function, class, or implementation detail MUST end with an inline citation in this exact format: (file_path:start_line-end_line)
+Example: "The AuthBase class defines the interface for authentication (src/requests/auth.py:34-52)."
+Do this for every claim, even in follow-up answers later in the conversation. Do not skip citations just because earlier turns already established context."""
+
     system_prompt = f"""You are an expert code Q&A assistant specializing in line-accurate code explanation.
 Answer the user's question using the provided code snippets and architecture context.
 
@@ -193,19 +216,36 @@ Answer the user's question using the provided code snippets and architecture con
 
 === INSTRUCTIONS ===
 1. Base your answer on the retrieved code snippets.
-2. For EVERY claim, code snippet, or implementation detail you mention, YOU MUST CITE the source file path and line numbers using the exact format `(file_path:start_line-end_line)`.
-   Example: "The authentication token is parsed in `AuthManager.login()` (src/auth.py:45-52)."
-3. If the provided chunks do not contain the actual implementation code, say so directly and do not invent or guess code that isn't present in the context. Never fabricate example implementations.
-4. Be precise, concise, and helpful.
+2. If the provided chunks do not contain the actual implementation code, say so directly and do not invent or guess code that isn't present in the context. Never fabricate example implementations.
+3. Be precise, concise, and helpful.
+
+{citation_instruction}
 """
 
-    groq_msgs = _build_groq_messages(system_prompt, question, messages)
+    groq_msgs = _build_groq_messages(system_prompt, question, messages, citation_reminder=citation_instruction)
 
     client = Groq(api_key=GROQ_API_KEY)
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=groq_msgs,
-        temperature=0.2,
-    )
+    response = None
+    for m in [GROQ_MODEL, "llama-3.1-8b-instant"]:
+        for attempt in range(3):
+            try:
+                response = client.chat.completions.create(
+                    model=m,
+                    messages=groq_msgs,
+                    temperature=0.2,
+                )
+                break
+            except Exception as e:
+                if "rate_limit" in str(e).lower() or "429" in str(e):
+                    import time
+                    print(f"[RETRIEVAL RATE LIMIT] Hit 429 on model '{m}' (attempt {attempt+1}/3). Waiting 4s...")
+                    time.sleep(4)
+                else:
+                    raise e
+        if response:
+            break
 
-    return response.choices[0].message.content or ""
+    return response.choices[0].message.content or "" if response else ""
+
+
+
